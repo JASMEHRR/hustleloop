@@ -1,3 +1,4 @@
+# Runs the pipeline once a day; also triggerable manually from the Actions tab.
 name: Daily HustleLoop Run
 
 on:
