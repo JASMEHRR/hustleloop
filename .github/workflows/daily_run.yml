@@ -1,0 +1,37 @@
+name: Daily HustleLoop Run
+
+on:
+  schedule:
+    - cron: "0 13 * * *"   # once a day, 13:00 UTC -- adjust to your preference
+  workflow_dispatch:        # lets you trigger it manually from the Actions tab too
+
+jobs:
+  run-loop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg (needed for YouTube frame sampling)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the loop
+        env:
+          GUMROAD_API_KEY: ${{ secrets.GUMROAD_API_KEY }}
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+        run: python main.py --publish
+
+      - name: Commit generated output + logs back to the repo
+        run: |
+          git config user.name "hustleloop-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add output/ logs/
+          git diff --staged --quiet || git commit -m "Automated run: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
