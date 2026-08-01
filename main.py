@@ -64,18 +64,45 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             run_log["steps"].append({"step": "youtube_analysis", "status": "error", "error": str(e)})
 
-    # 3. Pick top idea(s) and generate
-    generated_results = []
-    for idea in ideas[: args.top_n]:
+    # 3. Pick idea(s) that map to a real, finished-output format -- "generic"
+    # (a markdown outline, not a finished product) is a last resort only,
+    # so skip over ideas that would fall back to it rather than accept them.
+    IDEA_SCAN_CAP = 20
+    skipped_titles: list[str] = []
+    matched: list[tuple] = []
+    for idea in ideas[:IDEA_SCAN_CAP]:
         fmt = pick_format(idea.title)
-        try:
-            result = generate(idea.title, OUTPUT_DIR, fmt)
-            result["source"] = idea.source
-            result["reason"] = idea.reason
-            generated_results.append(result)
-            run_log["steps"].append({"step": "generate", "status": "ok", **result})
-        except Exception as e:  # noqa: BLE001
-            run_log["steps"].append({"step": "generate", "status": "error", "idea": idea.title, "error": str(e)})
+        if fmt == "generic":
+            skipped_titles.append(idea.title)
+            continue
+        matched.append((idea, fmt))
+        if len(matched) >= args.top_n:
+            break
+
+    if skipped_titles:
+        run_log["steps"].append({
+            "step": "idea_selection",
+            "skipped": skipped_titles,
+            "reason": "no matching finished-output format",
+        })
+
+    generated_results = []
+    if not matched:
+        run_log["steps"].append({
+            "step": "generate",
+            "status": "skipped_no_fit",
+            "reason": f"none of the top {min(IDEA_SCAN_CAP, len(ideas))} ranked ideas matched a finished-output format",
+        })
+    else:
+        for idea, fmt in matched:
+            try:
+                result = generate(idea.title, OUTPUT_DIR, fmt)
+                result["source"] = idea.source
+                result["reason"] = idea.reason
+                generated_results.append(result)
+                run_log["steps"].append({"step": "generate", "status": "ok", **result})
+            except Exception as e:  # noqa: BLE001
+                run_log["steps"].append({"step": "generate", "status": "error", "idea": idea.title, "error": str(e)})
 
     # 4. Optional publish
     if args.publish:

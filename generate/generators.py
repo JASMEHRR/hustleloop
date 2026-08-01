@@ -15,7 +15,9 @@ import random
 import textwrap
 from datetime import datetime, timezone
 
+from fpdf import FPDF
 from jinja2 import Template
+from PIL import Image, ImageDraw, ImageFont
 
 
 def _slug(text: str) -> str:
@@ -145,11 +147,84 @@ def generate_generic_text_pack(idea_title: str, output_root: str) -> list[str]:
     return [path]
 
 
+def generate_pdf_guide(idea_title: str, output_root: str) -> list[str]:
+    """Simple one-pager/guide PDF -- a finished, sellable format, no paid tools."""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 22)
+    pdf.multi_cell(0, 12, idea_title, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+    pdf.set_font("Helvetica", "", 12)
+    pdf.multi_cell(
+        0, 8,
+        "A quick-start guide inspired by current interest in this topic. "
+        "Replace this body text with your own step-by-step content -- "
+        "layout and typography are done for you.",
+        new_x="LMARGIN", new_y="NEXT",
+    )
+    pdf.ln(6)
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 10, "Key steps", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 12)
+    for i, step in enumerate(["Understand the basics", "Set up your tools", "Take your first action", "Review and improve"], start=1):
+        pdf.multi_cell(0, 8, f"{i}. {step}", new_x="LMARGIN", new_y="NEXT")
+    path = _out_path(idea_title, "guide.pdf", output_root)
+    pdf.output(path)
+    return [path]
+
+
+def generate_planner_pdf(idea_title: str, output_root: str) -> list[str]:
+    """Printable planner/checklist page PDF -- a finished, sellable format."""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.multi_cell(0, 12, idea_title, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 11)
+    pdf.multi_cell(0, 7, "Printable checklist -- tick off each item as you go.", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(6)
+    pdf.set_font("Helvetica", "", 13)
+    for i in range(1, 13):
+        pdf.cell(8, 10, "[ ]")
+        pdf.cell(0, 10, f"Item {i}", new_x="LMARGIN", new_y="NEXT")
+    path = _out_path(idea_title, "planner.pdf", output_root)
+    pdf.output(path)
+    return [path]
+
+
+def generate_social_post(idea_title: str, output_root: str) -> list[str]:
+    """Social-media announcement/quote card PNG, built with Pillow only."""
+    width, height = 1080, 1080
+    colors = [("#111827", "#f9fafb"), ("#2563eb", "#ffffff"), ("#7c3aed", "#ffffff")]
+    bg, fg = random.choice(colors)
+    img = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default(size=64)
+    small_font = ImageFont.load_default(size=32)
+
+    wrapped = textwrap.fill(idea_title, width=22)
+    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=16)
+    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    draw.multiline_text(
+        ((width - text_w) / 2, (height - text_h) / 2 - 40),
+        wrapped, font=font, fill=fg, align="center", spacing=16,
+    )
+    footer = "hustleloop"
+    fbbox = draw.textbbox((0, 0), footer, font=small_font)
+    draw.text(((width - (fbbox[2] - fbbox[0])) / 2, height - 100), footer, font=small_font, fill=fg)
+
+    path = _out_path(idea_title, "social_post.png", output_root)
+    img.save(path)
+    return [path]
+
+
 # Registry: add new formats here without touching the core loop.
 GENERATORS = {
     "icon_pack": generate_icon_pack,
     "newsletter_template": generate_newsletter_template,
     "website_template": generate_website_template,
+    "pdf_guide": generate_pdf_guide,
+    "planner": generate_planner_pdf,
+    "social_post": generate_social_post,
     "generic": generate_generic_text_pack,
 }
 
@@ -158,7 +233,10 @@ def pick_format(idea_title: str) -> str:
     """
     Very lightweight keyword match to route an idea to a format.
     Falls back to 'generic' rather than forcing a bad fit -- this keeps
-    the system honest about not being limited to 3-4 fixed categories.
+    the system honest about not being limited to a fixed set of categories.
+    'generic' is a last resort, not an everyday result -- see main.py's
+    idea-selection logic, which actively looks for a matching idea before
+    accepting it.
     """
     text = idea_title.lower()
     if any(k in text for k in ("icon", "logo", "emoji", "sticker")):
@@ -167,6 +245,12 @@ def pick_format(idea_title: str) -> str:
         return "newsletter_template"
     if any(k in text for k in ("website", "landing page", "site template")):
         return "website_template"
+    if any(k in text for k in ("planner", "checklist", "tracker")):
+        return "planner"
+    if any(k in text for k in ("guide", "printable", "ebook", "e-book", "workbook", "how to", "how-to")):
+        return "pdf_guide"
+    if any(k in text for k in ("quote", "social media", "instagram", "announcement", "post template")):
+        return "social_post"
     return "generic"
 
 
