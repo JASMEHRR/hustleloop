@@ -181,11 +181,53 @@ def scan_producthunt_rss() -> list[Idea]:
     return ideas[:30]
 
 
+# Words that plausibly signal digital-product / service potential. Not a
+# category whitelist -- a noise filter. A query doesn't need one of these to
+# survive; it just needs to not look like bare consumer-product/brand noise
+# (see _looks_like_brand_noise below).
+_DIGITAL_PRODUCT_SIGNAL_WORDS = {
+    "template", "planner", "tracker", "printable", "guide", "kit", "pack",
+    "course", "notion", "canva", "checklist", "calendar", "workbook",
+    "ebook", "worksheet", "spreadsheet", "resume", "cv", "journal",
+    "bundle", "preset", "mockup", "icon", "icons", "logo", "font", "fonts",
+    "prompt", "prompts", "script", "plugin", "theme", "software", "app",
+    "tool", "generator", "widget", "asset", "assets", "graphic", "graphics",
+    "design", "digital", "download", "sheet", "form", "automation",
+}
+
+
+def _looks_like_digital_product_relevant(query: str) -> bool:
+    """
+    Heuristic noise filter for scan_google_trends() results. Google Trends'
+    "rising related queries" often returns generic consumer-product/brand
+    noise (e.g. a shoe model name) alongside real digital-product signal.
+    This isn't a rigid category whitelist -- it's a filter for "does this
+    look like it could plausibly relate to a sellable digital product or
+    service", the same open-ended bar the rest of this module uses.
+    """
+    words = query.lower().split()
+    if not words:
+        return False
+    # Contains an explicit digital-product-ish word -- clear keep.
+    if any(w.strip(".,!?") in _DIGITAL_PRODUCT_SIGNAL_WORDS for w in words):
+        return True
+    # A short 2-3 word query with no signal word looks like a bare brand +
+    # product-line name (e.g. "adidas gazelle rosa") -- drop it.
+    if len(words) <= 3:
+        return False
+    # Longer, descriptive phrases are more likely to be genuine search
+    # intent worth investigating rather than a brand/model name -- keep.
+    return True
+
+
 def scan_google_trends(seed_terms: list[str] | None = None) -> list[Idea]:
     """
     Uses pytrends (unofficial, free, no key) to check rising related queries
     around a small set of broad seed terms. Seeds are broad on purpose so
     this doesn't quietly re-narrow back to "icons/logos/templates" only.
+
+    Results pass through _looks_like_digital_product_relevant() to drop
+    generic consumer-product/brand noise before merging with other sources.
     """
     from pytrends.request import TrendReq
 
@@ -199,12 +241,20 @@ def scan_google_trends(seed_terms: list[str] | None = None) -> list[Idea]:
         if rising is None:
             continue
         for _, row in rising.head(10).iterrows():
+            query = str(row["query"])
+            if not _looks_like_digital_product_relevant(query):
+                continue
+            value = row.get("value", 0)
+            # pytrends reports a true breakout as the string "Breakout"
+            # rather than a number -- treat it as a solid but not
+            # source-dominating signal, not an unbounded score.
+            score = float(value) if str(value).isdigit() else 100.0
             ideas.append(Idea(
-                title=str(row["query"]),
+                title=query,
                 category="unclassified",
                 source="google_trends",
                 reason=f"rising search interest near seed term '{term}'",
-                score=float(row.get("value", 0)) if str(row.get("value", "")).isdigit() else 5.0,
+                score=score,
                 raw={"seed_term": term},
             ))
         time.sleep(2)
@@ -263,10 +313,33 @@ def run_research(log_events: list[dict] | None = None) -> list[Idea]:
     all_ideas += _safe("etsy_search", scan_etsy_trending, log_events)
     all_ideas += _safe("producthunt_rss", scan_producthunt_rss, log_events)
 
-    # Simple rank: highest score first. This is a heuristic signal, not proof
-    # of demand -- documented in the README under Honest limits.
+    _normalize_scores_per_source(all_ideas)
+
+    # Simple rank: highest normalized score first. This is a heuristic
+    # signal, not proof of demand -- documented in the README under Honest
+    # limits.
     all_ideas.sort(key=lambda i: i.score, reverse=True)
     return all_ideas
+
+
+def _normalize_scores_per_source(ideas: list[Idea]) -> None:
+    """
+    Min-max normalizes each source's scores to a common 0-1 range in place,
+    per source, before the merged sort. Sources score on wildly different
+    raw scales (Reddit upvotes vs. Google Trends' rising-query values vs.
+    flat constants for scrape-only sources) -- comparing those magnitudes
+    directly lets one source's scale quirks (e.g. Trends breakouts) silently
+    dominate the merged top-10 regardless of actual cross-source relevance.
+    """
+    by_source: dict[str, list[Idea]] = {}
+    for idea in ideas:
+        by_source.setdefault(idea.source, []).append(idea)
+    for group in by_source.values():
+        lo = min(i.score for i in group)
+        hi = max(i.score for i in group)
+        spread = hi - lo
+        for i in group:
+            i.score = (i.score - lo) / spread if spread > 0 else 1.0
 
 
 if __name__ == "__main__":
