@@ -182,9 +182,9 @@ def scan_producthunt_rss() -> list[Idea]:
 
 
 # Words that plausibly signal digital-product / service potential. Not a
-# category whitelist -- a noise filter. A query doesn't need one of these to
-# survive; it just needs to not look like bare consumer-product/brand noise
-# (see _looks_like_brand_noise below).
+# category whitelist -- a noise filter. A title doesn't need one of these to
+# survive; it just needs to not look like bare consumer-product/brand/
+# unrelated-business noise (see _looks_like_digital_product_relevant below).
 _DIGITAL_PRODUCT_SIGNAL_WORDS = {
     "template", "planner", "tracker", "printable", "guide", "kit", "pack",
     "course", "notion", "canva", "checklist", "calendar", "workbook",
@@ -195,29 +195,50 @@ _DIGITAL_PRODUCT_SIGNAL_WORDS = {
     "design", "digital", "download", "sheet", "form", "automation",
 }
 
+# Well-known consumer/tech brand names. Their appearance is a strong signal
+# a title is about an existing named product/company, not a buildable
+# digital-product idea (e.g. "Microsoft 365 for IT Pros" or "adidas gazelle
+# rosa") -- dropped regardless of any signal word also present.
+_KNOWN_BRAND_NOISE = {
+    "adidas", "nike", "microsoft", "google", "apple", "amazon", "samsung",
+    "sony", "meta", "tesla", "ikea", "zara", "gucci", "puma", "reebok",
+    "walmart", "netflix", "disney",
+}
 
-def _looks_like_digital_product_relevant(query: str) -> bool:
+_STRIP_CHARS = ".,!?()[]{}–-*\"'"
+
+
+def _looks_like_digital_product_relevant(title: str) -> bool:
     """
-    Heuristic noise filter for scan_google_trends() results. Google Trends'
-    "rising related queries" often returns generic consumer-product/brand
-    noise (e.g. a shoe model name) alongside real digital-product signal.
-    This isn't a rigid category whitelist -- it's a filter for "does this
-    look like it could plausibly relate to a sellable digital product or
-    service", the same open-ended bar the rest of this module uses.
+    General-purpose noise filter, applied to ideas from every source after
+    collection and before final ranking. Reddit/Etsy/Gumroad/Product Hunt/
+    Google Trends all surface plenty of items that have nothing to do with
+    a sellable digital product or service (a trading platform, a church's
+    donation page, a random book title, an existing branded product) -- this
+    isn't a rigid category whitelist, it's a filter for "does this look like
+    it could plausibly relate to a sellable digital product or service".
     """
-    words = query.lower().split()
+    words = [w.strip(_STRIP_CHARS) for w in title.split()]
+    words = [w for w in words if w]
     if not words:
         return False
-    # Contains an explicit digital-product-ish word -- clear keep.
-    if any(w.strip(".,!?") in _DIGITAL_PRODUCT_SIGNAL_WORDS for w in words):
-        return True
-    # A short 2-3 word query with no signal word looks like a bare brand +
-    # product-line name (e.g. "adidas gazelle rosa") -- drop it.
-    if len(words) <= 3:
+    lower_words = [w.lower() for w in words]
+    if any(w in _KNOWN_BRAND_NOISE for w in lower_words):
         return False
-    # Longer, descriptive phrases are more likely to be genuine search
-    # intent worth investigating rather than a brand/model name -- keep.
-    return True
+    has_signal = any(w in _DIGITAL_PRODUCT_SIGNAL_WORDS for w in lower_words)
+    if has_signal:
+        return True
+    if len(words) <= 3:
+        # Short title with no signal word -- looks like a bare brand/product
+        # name or org name (e.g. "Tendon Book", "RED-E Society").
+        return False
+    # Longer titles with no signal word: only rescue ones that read like a
+    # genuine descriptive phrase/search query (mostly lowercase), not a
+    # Title-Cased product/business name (e.g. "Ninja Trader [Wave Runner
+    # RENKO]", "MoveFit Mama Dance & Dumbbells 30 Day Challenge").
+    capitalized = sum(1 for w in words[1:] if w[:1].isupper())
+    cap_ratio = capitalized / max(len(words) - 1, 1)
+    return cap_ratio <= 0.5
 
 
 def scan_google_trends(seed_terms: list[str] | None = None) -> list[Idea]:
@@ -226,8 +247,9 @@ def scan_google_trends(seed_terms: list[str] | None = None) -> list[Idea]:
     around a small set of broad seed terms. Seeds are broad on purpose so
     this doesn't quietly re-narrow back to "icons/logos/templates" only.
 
-    Results pass through _looks_like_digital_product_relevant() to drop
-    generic consumer-product/brand noise before merging with other sources.
+    Raw results, including noise -- run_research() applies
+    _looks_like_digital_product_relevant() across all sources' results
+    together, not just this one.
     """
     from pytrends.request import TrendReq
 
@@ -242,8 +264,6 @@ def scan_google_trends(seed_terms: list[str] | None = None) -> list[Idea]:
             continue
         for _, row in rising.head(10).iterrows():
             query = str(row["query"])
-            if not _looks_like_digital_product_relevant(query):
-                continue
             value = row.get("value", 0)
             # pytrends reports a true breakout as the string "Breakout"
             # rather than a number -- treat it as a solid but not
@@ -298,6 +318,25 @@ def scan_gumroad_discover() -> list[Idea]:
     return ideas
 
 
+def _filter_relevant(ideas: list[Idea], log_events: list[dict]) -> list[Idea]:
+    """
+    Applies _looks_like_digital_product_relevant() across ideas from every
+    source, and logs a before/after count per source so it's visible if a
+    source is effectively being filtered out entirely (that's a signal the
+    source may be a poor fit for this project, not necessarily a bug).
+    """
+    before: dict[str, int] = {}
+    after: dict[str, int] = {}
+    kept: list[Idea] = []
+    for idea in ideas:
+        before[idea.source] = before.get(idea.source, 0) + 1
+        if _looks_like_digital_product_relevant(idea.title):
+            kept.append(idea)
+            after[idea.source] = after.get(idea.source, 0) + 1
+    log_events.append({"step": "research_filter", "before": before, "after": after})
+    return kept
+
+
 def run_research(log_events: list[dict] | None = None) -> list[Idea]:
     """
     Runs every source, merges results, and returns a ranked idea list.
@@ -313,6 +352,7 @@ def run_research(log_events: list[dict] | None = None) -> list[Idea]:
     all_ideas += _safe("etsy_search", scan_etsy_trending, log_events)
     all_ideas += _safe("producthunt_rss", scan_producthunt_rss, log_events)
 
+    all_ideas = _filter_relevant(all_ideas, log_events)
     _normalize_scores_per_source(all_ideas)
 
     # Simple rank: highest normalized score first. This is a heuristic
