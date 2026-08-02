@@ -76,6 +76,111 @@ def scan_reddit_public(subreddits: list[str] | None = None) -> list[Idea]:
     return ideas
 
 
+def scan_reddit_rss(subreddits: list[str] | None = None) -> list[Idea]:
+    """
+    Workaround for scan_reddit_public getting 403'd by Cloudflare on the
+    JSON API: old.reddit.com's per-subreddit RSS feeds are served from a
+    different path that frequently isn't blocked the same way. Independent
+    source (own _safe() entry) so if one of the two reddit approaches works
+    on a given day, research still gets reddit signal.
+    """
+    import xml.etree.ElementTree as ET
+
+    subreddits = subreddits or [
+        "SideProject", "Entrepreneur", "EtsySellers", "SomebodyMakeThis",
+    ]
+    ideas: list[Idea] = []
+    headers = {"User-Agent": "hustleloop-research-bot/1.0"}
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    for sub in subreddits:
+        url = f"https://old.reddit.com/r/{sub}/top/.rss?t=week&limit=15"
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+        for entry in root.findall("atom:entry", ns):
+            title_el = entry.find("atom:title", ns)
+            title = (title_el.text or "").strip() if title_el is not None else ""
+            if not title:
+                continue
+            ideas.append(Idea(
+                title=title,
+                category="unclassified",
+                source=f"reddit_rss:r/{sub}",
+                reason="top post this week (via old.reddit.com RSS)",
+                score=25.0,
+                raw={"subreddit": sub},
+            ))
+        time.sleep(1.0)
+    return ideas
+
+
+def scan_etsy_trending() -> list[Idea]:
+    """
+    Etsy's public search-results page for a broad "digital download" query,
+    scraped the same lightweight way as scan_gumroad_discover: no API key,
+    tolerant of markup changes (returns fewer/no ideas rather than crashing).
+    """
+    import re
+
+    ideas: list[Idea] = []
+    headers = {"User-Agent": "Mozilla/5.0 (hustleloop-research-bot/1.0)"}
+    resp = requests.get(
+        "https://www.etsy.com/search?q=digital+download&explicit=1",
+        headers=headers, timeout=10,
+    )
+    resp.raise_for_status()
+    # Listing titles are rendered as `title="..."` on listing-link anchors.
+    titles = re.findall(r'data-listing-card-listing-title="([^"]+)"', resp.text)
+    if not titles:
+        titles = re.findall(r'class="[^"]*text-body[^"]*"[^>]*>([^<]{10,80})<', resp.text)
+    seen = set()
+    for t in titles:
+        t = t.strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        ideas.append(Idea(
+            title=t,
+            category="unclassified",
+            source="etsy_search",
+            reason="currently listed in Etsy digital-download search results",
+            score=8.0,
+        ))
+    return ideas[:30]
+
+
+def scan_producthunt_rss() -> list[Idea]:
+    """
+    Product Hunt publishes a public RSS feed of newly launched products --
+    no API key required. Skews toward apps/SaaS rather than one-off digital
+    downloads, but is useful signal for what's getting attention right now.
+    """
+    import xml.etree.ElementTree as ET
+
+    ideas: list[Idea] = []
+    headers = {"User-Agent": "hustleloop-research-bot/1.0"}
+    resp = requests.get("https://www.producthunt.com/feed", headers=headers, timeout=10)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+    ns = {"atom": "http://www.w3.org/2005/Atom"}
+    entries = root.findall(".//item") or root.findall("atom:entry", ns)
+    for item in entries:
+        title_el = item.find("title")
+        if title_el is None:
+            title_el = item.find("atom:title", ns)
+        title = (title_el.text or "").strip() if title_el is not None else ""
+        if not title:
+            continue
+        ideas.append(Idea(
+            title=title,
+            category="unclassified",
+            source="producthunt_rss",
+            reason="newly launched product on Product Hunt",
+            score=15.0,
+        ))
+    return ideas[:30]
+
+
 def scan_google_trends(seed_terms: list[str] | None = None) -> list[Idea]:
     """
     Uses pytrends (unofficial, free, no key) to check rising related queries
@@ -99,7 +204,7 @@ def scan_google_trends(seed_terms: list[str] | None = None) -> list[Idea]:
                 category="unclassified",
                 source="google_trends",
                 reason=f"rising search interest near seed term '{term}'",
-                score=float(row.get("value", 0)) if str(row.get("value", "")).isdigit() else 50.0,
+                score=float(row.get("value", 0)) if str(row.get("value", "")).isdigit() else 5.0,
                 raw={"seed_term": term},
             ))
         time.sleep(2)
@@ -152,8 +257,11 @@ def run_research(log_events: list[dict] | None = None) -> list[Idea]:
     log_events = log_events if log_events is not None else []
     all_ideas: list[Idea] = []
     all_ideas += _safe("reddit", scan_reddit_public, log_events)
+    all_ideas += _safe("reddit_rss", scan_reddit_rss, log_events)
     all_ideas += _safe("google_trends", scan_google_trends, log_events)
     all_ideas += _safe("gumroad_discover", scan_gumroad_discover, log_events)
+    all_ideas += _safe("etsy_search", scan_etsy_trending, log_events)
+    all_ideas += _safe("producthunt_rss", scan_producthunt_rss, log_events)
 
     # Simple rank: highest score first. This is a heuristic signal, not proof
     # of demand -- documented in the README under Honest limits.
